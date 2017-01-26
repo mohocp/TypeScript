@@ -3781,7 +3781,7 @@
     }
 
     /* @internal */
-    export const enum EmitContext {
+    export const enum EmitHint {
         SourceFile,         // Emitting a SourceFile
         Expression,         // Emitting an Expression
         IdentifierName,     // Emitting an IdentifierName
@@ -3856,7 +3856,7 @@
          * Hook used by transformers to substitute expressions just before they
          * are emitted by the pretty printer.
          */
-        onSubstituteNode?: (emitContext: EmitContext, node: Node) => Node;
+        onSubstituteNode?: (hint: EmitHint, node: Node) => Node;
 
         /**
          * Enables before/after emit notifications in the pretty printer for the provided
@@ -3874,7 +3874,7 @@
          * Hook used to allow transformers to capture state before or after
          * the printer emits a node.
          */
-        onEmitNode?: (emitContext: EmitContext, node: Node, emitCallback: (emitContext: EmitContext, node: Node) => void) => void;
+        onEmitNode?: (hint: EmitHint, node: Node, emitCallback: (hint: EmitHint, node: Node) => void) => void;
     }
 
     /* @internal */
@@ -3884,23 +3884,27 @@
          */
         transformed: SourceFile[];
 
+        setPrintContext(printContext: PrintContext): void;
+
+        substitute(hint: EmitHint, node: Node): Node;
+
         /**
          * Emits the substitute for a node, if one is available; otherwise, emits the node.
          *
-         * @param emitContext The current emit context.
+         * @param hint A hint as to the intended usage of the node.
          * @param node The node to substitute.
          * @param emitCallback A callback used to emit the node or its substitute.
          */
-        emitNodeWithSubstitution(emitContext: EmitContext, node: Node, emitCallback: (emitContext: EmitContext, node: Node) => void): void;
+        emitNodeWithSubstitution(hint: EmitHint, node: Node, emitCallback: (hint: EmitHint, node: Node) => void): void;
 
         /**
          * Emits a node with possible notification.
          *
-         * @param emitContext The current emit context.
+         * @param hint A hint as to the intended usage of the node.
          * @param node The node to emit.
          * @param emitCallback A callback used to emit the node.
          */
-        emitNodeWithNotification(emitContext: EmitContext, node: Node, emitCallback: (emitContext: EmitContext, node: Node) => void): void;
+        emitNodeWithNotification(hint: EmitHint, node: Node, emitCallback: (hint: EmitHint, node: Node) => void): void;
     }
 
     /* @internal */

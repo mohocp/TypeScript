@@ -1,308 +1,127 @@
 /// <reference path="checker.ts"/>
 /// <reference path="transformer.ts" />
-/// <reference path="nameGenerator.ts"/>
-/// <reference path="declarationEmitter.ts"/>
+/// <reference path="nameGenerator.ts" />
 /// <reference path="sourcemap.ts"/>
 /// <reference path="comments.ts" />
 
 /* @internal */
 namespace ts {
-    const USE_PRINTER = false;
+    const delimiters = createDelimiterMap();
+    const brackets = createBracketsMap();
 
-    const id = (s: SourceFile) => s;
-    const nullTransformers: Transformer[] = [_ => id];
+    export interface Printer {
+        print(hint: EmitHint, node: Node, sourceFile: SourceFile): void;
+        onSubstituteNode(hint: EmitHint, node: Node): Node;
+        onEmitNode(hint: EmitHint, node: Node, emitCallback: (hint: EmitHint, node: Node) => void): void;
+    }
 
+    export interface PrintContext {
+        substitute(hint: EmitHint, node: Node): Node;
+        emit(hint: EmitHint, node: Node, emitCallback: (hint: EmitHint, node: Node) => void): void;
+        emitPos(pos: number): void;
+        emitBody(node: Node, elements: NodeArray<Node>, emitCallback: (node: Node) => void): void;
+        emitElement(node: Node, emitCallback: (node: Node) => void): void;
+        emitHelpers(node: Node, writeLines: (text: string) => void): void;
+        emitToken(node: Node, token: SyntaxKind, pos: number, emitCallback: (token: SyntaxKind, pos: number) => number): number;
+    }
 
-    // targetSourceFile is when users only want one file in entire project to be emitted. This is used in compileOnSave feature
-    export function emitFiles(resolver: EmitResolver, host: EmitHost, targetSourceFile: SourceFile, emitOnlyDtsFiles?: boolean): EmitResult {
-        const delimiters = createDelimiterMap();
-        const brackets = createBracketsMap();
-        const compilerOptions = host.getCompilerOptions();
+    export type PrinterHook = (context: PrintContext) => void;
+
+    export interface PrinterOptions {
+        sourceMap?: SourceMapWriter;
+        comments?: CommentWriter;
+        transforms?: TransformationResult;
+    }
+
+    export function createPrinter(writer: EmitTextWriter, nameGenerator: NameGenerator, compilerOptions: CompilerOptions, printerOptions: PrinterOptions) {
         const languageVersion = getEmitScriptTarget(compilerOptions);
-        const moduleKind = getEmitModuleKind(compilerOptions);
-        const sourceMapDataList: SourceMapData[] = compilerOptions.sourceMap || compilerOptions.inlineSourceMap ? [] : undefined;
-        const emittedFilesList: string[] = compilerOptions.listEmittedFiles ? [] : undefined;
-        const emitterDiagnostics = createDiagnosticCollection();
-        const newLine = host.getNewLine();
-        const transformers: Transformer[] = emitOnlyDtsFiles ? nullTransformers : getTransformers(compilerOptions);
-        const writer = createTextWriter(newLine);
-        const {
-            write,
-            writeLine,
-            increaseIndent,
-            decreaseIndent
-        } = writer;
-
-        const sourceMap = createSourceMapWriter(host, writer);
-        const {
-            emitNodeWithSourceMap,
-            emitTokenWithSourceMap
-        } = sourceMap;
-
-        const comments = createCommentWriter(writer, compilerOptions, newLine, sourceMap.emitPos);
-        const {
-            emitNodeWithComments,
-            emitBodyWithDetachedComments,
-            emitTrailingCommentsOfPosition
-        } = comments;
-
-        const nameGenerator = createNameGenerator(resolver, getTextOfNode);
-        const {
-            pushNameGenerationScope,
-            popNameGenerationScope,
-            generateName
-        } = nameGenerator;
+        const sourceMap = printerOptions && printerOptions.sourceMap;
+        const comments = printerOptions && printerOptions.comments;
+        const transforms = printerOptions && printerOptions.transforms;
+        const emitNodeWithSourceMap = sourceMap && sourceMap.emitNodeWithSourceMap;
+        const emitNodeWithComments = comments && comments.emitNodeWithComments;
+        const emitBodyWithDetachedComments = comments && comments.emitBodyWithDetachedComments;
+        const emitNodeWithNotification = transforms && transforms.emitNodeWithNotification;
+        const emitNodeWithSubstitution = transforms && transforms.emitNodeWithSubstitution;
 
         let currentSourceFile: SourceFile;
-        let currentText: string;
-        let bundledHelpers: Map<boolean>;
-        let isOwnFileEmit: boolean;
-        let emitSkipped = false;
+        return print;
 
-        const sourceFiles = getSourceFilesToEmit(host, targetSourceFile);
-
-        // Transform the source files
-        performance.mark("beforeTransform");
-        const {
-            transformed,
-            emitNodeWithSubstitution,
-            emitNodeWithNotification
-        } = transformFiles(resolver, host, sourceFiles, transformers);
-        performance.measure("transformTime", "beforeTransform");
-
-        // Emit each output file
-        performance.mark("beforePrint");
-        forEachEmittedFile(host, emitFile, transformed, emitOnlyDtsFiles);
-        performance.measure("printTime", "beforePrint");
-
-        // Clean up emit nodes on parse tree
-        for (const sourceFile of sourceFiles) {
-            disposeEmitNodes(sourceFile);
+        function print(hint: EmitHint, node: Node, sourceFile: SourceFile) {
+            const savedCurrentSourceFile = currentSourceFile;
+            currentSourceFile = sourceFile;
+            pipelineEmitWithNotification(hint, node);
+            currentSourceFile = savedCurrentSourceFile;
         }
 
-        return {
-            emitSkipped,
-            diagnostics: emitterDiagnostics.getDiagnostics(),
-            emittedFiles: emittedFilesList,
-            sourceMaps: sourceMapDataList
-        };
-
-        function emitFile({ jsFilePath, sourceMapFilePath, declarationFilePath }: EmitFileNames, sourceFiles: SourceFile[], isBundledEmit: boolean) {
-            // Make sure not to write js file and source map file if any of them cannot be written
-            if (!host.isEmitBlocked(jsFilePath) && !compilerOptions.noEmit) {
-                if (!emitOnlyDtsFiles) {
-                    printFile(jsFilePath, sourceMapFilePath, sourceFiles, isBundledEmit);
-                }
-            }
-            else {
-                emitSkipped = true;
-            }
-
-            if (declarationFilePath) {
-                emitSkipped = writeDeclarationFile(declarationFilePath, getOriginalSourceFiles(sourceFiles), isBundledEmit, host, resolver, emitterDiagnostics, emitOnlyDtsFiles) || emitSkipped;
-            }
-
-            if (!emitSkipped && emittedFilesList) {
-                if (!emitOnlyDtsFiles) {
-                    emittedFilesList.push(jsFilePath);
-                }
-                if (sourceMapFilePath) {
-                    emittedFilesList.push(sourceMapFilePath);
-                }
-                if (declarationFilePath) {
-                    emittedFilesList.push(declarationFilePath);
-                }
-            }
+        function emit(node: Node, hint = EmitHint.Unspecified) {
+            pipelineEmitWithNotification(hint, node);
         }
 
-        function printFile(jsFilePath: string, sourceMapFilePath: string, sourceFiles: SourceFile[], isBundledEmit: boolean) {
-            sourceMap.initialize(jsFilePath, sourceMapFilePath, sourceFiles, isBundledEmit);
-            bundledHelpers = isBundledEmit ? createMap<boolean>() : undefined;
-            isOwnFileEmit = !isBundledEmit;
-
-            // Emit helpers from all the files
-            if (isBundledEmit && moduleKind) {
-                for (const sourceFile of sourceFiles) {
-                    emitHelpers(sourceFile, /*isBundle*/ true);
-                }
-            }
-
-            // Print each transformed source file.
-            forEach(sourceFiles, printSourceFile);
-
-            writeLine();
-
-            const sourceMappingURL = sourceMap.getSourceMappingURL();
-            if (sourceMappingURL) {
-                write(`//# ${"sourceMappingURL"}=${sourceMappingURL}`); // Sometimes tools can sometimes see this line as a source mapping url comment
-            }
-
-            // Write the source map
-            if (compilerOptions.sourceMap && !compilerOptions.inlineSourceMap) {
-                writeFile(host, emitterDiagnostics, sourceMapFilePath, sourceMap.getText(),  /*writeByteOrderMark*/ false, sourceFiles);
-            }
-
-            // Record source map data for the test harness.
-            if (sourceMapDataList) {
-                sourceMapDataList.push(sourceMap.getSourceMapData());
-            }
-
-            // Write the output file
-            writeFile(host, emitterDiagnostics, jsFilePath, writer.getText(), compilerOptions.emitBOM, sourceFiles);
-
-            // Reset state
-            sourceMap.reset();
-            comments.reset();
-            writer.reset();
-            nameGenerator.reset();
-
-            currentSourceFile = undefined;
-            currentText = undefined;
-            isOwnFileEmit = false;
-        }
-
-        function printSourceFile(node: SourceFile) {
-            if (USE_PRINTER) {
-                printer(EmitHint.SourceFile, node, node);
-            }
-            else {
-                currentSourceFile = node;
-                currentText = node.text;
-                sourceMap.setSourceFile(node);
-                comments.setSourceFile(node);
-                nameGenerator.setSourceFile(node);
-                pipelineEmitWithNotification(EmitHint.SourceFile, node);
-            }
-        }
-
-        /**
-         * Emits a node.
-         */
-        function emit(node: Node) {
-            pipelineEmitWithNotification(EmitHint.Unspecified, node);
-        }
-
-        /**
-         * Emits an IdentifierName.
-         */
         function emitIdentifierName(node: Identifier) {
             pipelineEmitWithNotification(EmitHint.IdentifierName, node);
         }
 
-        /**
-         * Emits an expression node.
-         */
         function emitExpression(node: Expression) {
             pipelineEmitWithNotification(EmitHint.Expression, node);
         }
 
-        /**
-         * Emits a node with possible notification.
-         *
-         * NOTE: Do not call this method directly. It is part of the emit pipeline
-         * and should only be called from printSourceFile, emit, emitExpression, or
-         * emitIdentifierName.
-         */
         function pipelineEmitWithNotification(hint: EmitHint, node: Node) {
-            emitNodeWithNotification(hint, node, pipelineEmitWithComments);
+            if (emitNodeWithNotification) {
+                emitNodeWithNotification(hint, node, pipelineEmitWithComments);
+            }
+            else {
+                pipelineEmitWithComments(hint, node);
+            }
         }
 
-        /**
-         * Emits a node with comments.
-         *
-         * NOTE: Do not call this method directly. It is part of the emit pipeline
-         * and should only be called indirectly from pipelineEmitWithNotification.
-         */
         function pipelineEmitWithComments(hint: EmitHint, node: Node) {
-            // Do not emit comments for SourceFile
-            if (hint === EmitHint.SourceFile) {
+            if (emitNodeWithComments && hint !== EmitHint.SourceFile) {
+                emitNodeWithComments(hint, node, pipelineEmitWithSourceMap);
+            }
+            else {
                 pipelineEmitWithSourceMap(hint, node);
-                return;
             }
-
-            emitNodeWithComments(hint, node, pipelineEmitWithSourceMap);
         }
 
-        /**
-         * Emits a node with source maps.
-         *
-         * NOTE: Do not call this method directly. It is part of the emit pipeline
-         * and should only be called indirectly from pipelineEmitWithComments.
-         */
         function pipelineEmitWithSourceMap(hint: EmitHint, node: Node) {
-            // Do not emit source mappings for SourceFile or IdentifierName
-            if (hint === EmitHint.SourceFile
-                || hint === EmitHint.IdentifierName) {
+            if (emitNodeWithSourceMap && hint !== EmitHint.SourceFile && hint !== EmitHint.IdentifierName) {
+                emitNodeWithSourceMap(hint, node, pipelineEmitWithSubstitution);
+            }
+            else {
                 pipelineEmitWithSubstitution(hint, node);
-                return;
             }
-
-            emitNodeWithSourceMap(hint, node, pipelineEmitWithSubstitution);
         }
 
-        /**
-         * Emits a node with possible substitution.
-         *
-         * NOTE: Do not call this method directly. It is part of the emit pipeline
-         * and should only be called indirectly from pipelineEmitWithSourceMap or
-         * pipelineEmitInUnspecifiedContext (when picking a more specific context).
-         */
         function pipelineEmitWithSubstitution(hint: EmitHint, node: Node) {
-            emitNodeWithSubstitution(hint, node, pipelineEmitForContext);
+            if (emitNodeWithSubstitution) {
+                emitNodeWithSubstitution(hint, node, pipelineEmitWithHint);
+            }
+            else {
+                pipelineEmitWithHint(hint, node);
+            }
         }
 
-        /**
-         * Emits a node.
-         *
-         * NOTE: Do not call this method directly. It is part of the emit pipeline
-         * and should only be called indirectly from pipelineEmitWithSubstitution.
-         */
-        function pipelineEmitForContext(hint: EmitHint, node: Node): void {
+        function pipelineEmitWithHint(hint: EmitHint, node: Node): void {
             switch (hint) {
-                case EmitHint.SourceFile: return pipelineEmitInSourceFileContext(node);
-                case EmitHint.IdentifierName: return pipelineEmitInIdentifierNameContext(node);
-                case EmitHint.Unspecified: return pipelineEmitInUnspecifiedContext(node);
-                case EmitHint.Expression: return pipelineEmitInExpressionContext(node);
+                case EmitHint.SourceFile: return pipelineEmitSourceFile(node);
+                case EmitHint.IdentifierName: return pipelineEmitIdentifierName(node);
+                case EmitHint.Expression: return pipelineEmitExpression(node);
+                case EmitHint.Unspecified: return pipelineEmitUnspecified(node);
             }
         }
 
-        /**
-         * Emits a node in the SourceFile hint.
-         *
-         * NOTE: Do not call this method directly. It is part of the emit pipeline
-         * and should only be called indirectly from pipelineEmitForContext.
-         */
-        function pipelineEmitInSourceFileContext(node: Node): void {
-            const kind = node.kind;
-            switch (kind) {
-                // Top-level nodes
-                case SyntaxKind.SourceFile:
-                    return emitSourceFile(<SourceFile>node);
-            }
+        function pipelineEmitSourceFile(node: Node): void {
+            Debug.assertNode(node, isSourceFile);
+            emitSourceFile(<SourceFile>node);
         }
 
-        /**
-         * Emits a node in the IdentifierName hint.
-         *
-         * NOTE: Do not call this method directly. It is part of the emit pipeline
-         * and should only be called indirectly from pipelineEmitForContext.
-         */
-        function pipelineEmitInIdentifierNameContext(node: Node): void {
-            const kind = node.kind;
-            switch (kind) {
-                // Identifiers
-                case SyntaxKind.Identifier:
-                    return emitIdentifier(<Identifier>node);
-            }
+        function pipelineEmitIdentifierName(node: Node): void {
+            Debug.assertNode(node, isIdentifier);
+            emitIdentifier(<Identifier>node);
         }
 
-        /**
-         * Emits a node in the Unspecified hint.
-         *
-         * NOTE: Do not call this method directly. It is part of the emit pipeline
-         * and should only be called indirectly from pipelineEmitForContext.
-         */
-        function pipelineEmitInUnspecifiedContext(node: Node): void {
+        function pipelineEmitUnspecified(node: Node): void {
             const kind = node.kind;
             switch (kind) {
                 // Pseudo-literals
@@ -573,17 +392,11 @@ namespace ts {
             // If the node is an expression, try to emit it as an expression with
             // substitution.
             if (isExpression(node)) {
-                return pipelineEmitWithSubstitution(EmitHint.Expression, node);
+                pipelineEmitWithSubstitution(EmitHint.Expression, node);
             }
         }
 
-        /**
-         * Emits a node in the Expression hint.
-         *
-         * NOTE: Do not call this method directly. It is part of the emit pipeline
-         * and should only be called indirectly from pipelineEmitForContext.
-         */
-        function pipelineEmitInExpressionContext(node: Node): void {
+        function pipelineEmitExpression(node: Node): void {
             const kind = node.kind;
             switch (kind) {
                 // Literals
@@ -673,6 +486,15 @@ namespace ts {
                 // Transformation nodes
                 case SyntaxKind.PartiallyEmittedExpression:
                     return emitPartiallyEmittedExpression(<PartiallyEmittedExpression>node);
+            }
+        }
+
+        function emitBodyIndirect(node: Node, elements: NodeArray<Node>, emitCallback: (node: Node) => void): void {
+            if (emitBodyWithDetachedComments) {
+                emitBodyWithDetachedComments(node, elements, emitCallback);
+            }
+            else {
+                emitCallback(node);
             }
         }
 
@@ -1034,7 +856,7 @@ namespace ts {
             let indentAfterDot = false;
             if (!(getEmitFlags(node) & EmitFlags.NoIndentation)) {
                 const dotRangeStart = node.expression.end;
-                const dotRangeEnd = skipTrivia(currentText, node.expression.end) + 1;
+                const dotRangeEnd = skipTrivia(currentSourceFile.text, node.expression.end) + 1;
                 const dotToken = <Node>{ kind: SyntaxKind.DotToken, pos: dotRangeStart, end: dotRangeEnd };
                 indentBeforeDot = needsIndentation(node, node.expression, dotToken);
                 indentAfterDot = needsIndentation(node, dotToken, node.name);
@@ -1574,10 +1396,11 @@ namespace ts {
             write(" {");
             increaseIndent();
 
-            emitBodyWithDetachedComments(body, body.statements,
-                shouldEmitBlockFunctionBodyOnSingleLine(body)
-                    ? emitBlockFunctionBodyOnSingleLine
-                    : emitBlockFunctionBodyWorker);
+            const emitBlockFunctionBody = shouldEmitBlockFunctionBodyOnSingleLine(body)
+                ? emitBlockFunctionBodyOnSingleLine
+                : emitBlockFunctionBodyWorker;
+
+            emitBodyIndirect(body, body.statements, emitBlockFunctionBody);
 
             decreaseIndent();
             writeToken(SyntaxKind.CloseBraceToken, body.statements.end, body);
@@ -1590,9 +1413,9 @@ namespace ts {
         function emitBlockFunctionBodyWorker(body: Block, emitBlockFunctionBodyOnSingleLine?: boolean) {
             // Emit all the prologue directives (like "use strict").
             const statementOffset = emitPrologueDirectives(body.statements, /*startWithNewLine*/ true);
-            const helpersEmitted = emitHelpers(body);
-
-            if (statementOffset === 0 && !helpersEmitted && emitBlockFunctionBodyOnSingleLine) {
+            const pos = writer.getTextPos();
+            context.emitHelpers(body, writeLines);
+            if (statementOffset === 0 && pos === writer.getTextPos() && emitBlockFunctionBodyOnSingleLine) {
                 decreaseIndent();
                 emitList(body, body.statements, ListFormat.SingleLineFunctionBodyStatements);
                 increaseIndent();
@@ -1942,11 +1765,11 @@ namespace ts {
             // but rather a trailing comment on the previous node.
             const initializer = node.initializer;
             if ((getEmitFlags(initializer) & EmitFlags.NoLeadingComments) === 0) {
-                const commentRange = getCommentRange(initializer);
-                emitTrailingCommentsOfPosition(commentRange.pos);
+                context.emitElement(initializer, emitExpression);
             }
-
-            emitExpression(initializer);
+            else {
+                emitExpression(initializer);
+            }
         }
 
         function emitShorthandPropertyAssignment(node: ShorthandPropertyAssignment) {
@@ -1980,14 +1803,14 @@ namespace ts {
         function emitSourceFile(node: SourceFile) {
             writeLine();
             emitShebang();
-            emitBodyWithDetachedComments(node, node.statements, emitSourceFileWorker);
+            emitBodyIndirect(node, node.statements, emitSourceFileWorker);
         }
 
         function emitSourceFileWorker(node: SourceFile) {
             const statements = node.statements;
             const statementOffset = emitPrologueDirectives(statements);
             pushNameGenerationScope();
-            emitHelpers(node);
+            context.emitHelpers(node, writeLines);
             emitList(node, statements, ListFormat.MultiLine, statementOffset);
             popNameGenerationScope();
         }
@@ -2019,83 +1842,12 @@ namespace ts {
             return statements.length;
         }
 
-        function emitHelpers(node: Node, isBundle?: boolean) {
-            const sourceFile = isSourceFile(node) ? node : currentSourceFile;
-            const shouldSkip = compilerOptions.noEmitHelpers || (sourceFile && getExternalHelpersModuleName(sourceFile) !== undefined);
-            const shouldBundle = isSourceFile(node) && !isOwnFileEmit;
-
-            let helpersEmitted = false;
-            const helpers = getEmitHelpers(node);
-            if (helpers) {
-                for (const helper of stableSort(helpers, compareEmitHelpers)) {
-                    if (!helper.scoped) {
-                        // Skip the helper if it can be skipped and the noEmitHelpers compiler
-                        // option is set, or if it can be imported and the importHelpers compiler
-                        // option is set.
-                        if (shouldSkip) continue;
-
-                        // Skip the helper if it can be bundled but hasn't already been emitted and we
-                        // are emitting a bundled module.
-                        if (shouldBundle) {
-                            if (bundledHelpers.get(helper.name)) {
-                                continue;
-                            }
-
-                            bundledHelpers.set(helper.name, true);
-                        }
-                    }
-                    else if (isBundle) {
-                        // Skip the helper if it is scoped and we are emitting bundled helpers
-                        continue;
-                    }
-
-                    writeLines(helper.text);
-                    helpersEmitted = true;
-                }
-            }
-
-            if (helpersEmitted) {
-                writeLine();
-            }
-
-            return helpersEmitted;
-        }
-
-        function writeLines(text: string): void {
-            const lines = text.split(/\r\n?|\n/g);
-            const indentation = guessIndentation(lines);
-            for (let i = 0; i < lines.length; i++) {
-                const line = indentation ? lines[i].slice(indentation) : lines[i];
-                if (line.length) {
-                    if (i > 0) {
-                        writeLine();
-                    }
-                    write(line);
-                }
-            }
-        }
-
-        function guessIndentation(lines: string[]) {
-            let indentation: number;
-            for (const line of lines) {
-                for (let i = 0; i < line.length && (indentation === undefined || i < indentation); i++) {
-                    if (!isWhiteSpace(line.charCodeAt(i))) {
-                        if (indentation === undefined || i < indentation) {
-                            indentation = i;
-                            break;
-                        }
-                    }
-                }
-            }
-            return indentation;
-        }
-
         //
         // Helpers
         //
 
         function emitShebang() {
-            const shebang = getShebang(currentText);
+            const shebang = getShebang(currentSourceFile.text);
             if (shebang) {
                 write(shebang);
                 writeLine();
@@ -2253,16 +2005,14 @@ namespace ts {
                         }
                     }
 
+                    // Emit this child.
                     if (shouldEmitInterveningComments) {
-                        const commentRange = getCommentRange(child);
-                        emitTrailingCommentsOfPosition(commentRange.pos);
+                        context.emitElement(child, emit);
                     }
                     else {
                         shouldEmitInterveningComments = mayEmitInterveningComments;
+                        emit(child);
                     }
-
-                    // Emit this child.
-                    emit(child);
 
                     if (shouldDecreaseIndentAfterEmit) {
                         decreaseIndent();
@@ -2297,13 +2047,8 @@ namespace ts {
             }
         }
 
-        function writeLineOrSpace(node: Node) {
-            if (getEmitFlags(node) & EmitFlags.SingleLine) {
-                write(" ");
-            }
-            else {
-                writeLine();
-            }
+        function write(s: string): void {
+            writer.write(s);
         }
 
         function writeIfAny(nodes: NodeArray<Node>, text: string) {
@@ -2319,13 +2064,59 @@ namespace ts {
         }
 
         function writeToken(token: SyntaxKind, pos: number, contextNode?: Node) {
-            return emitTokenWithSourceMap(contextNode, token, pos, writeTokenText);
+            return context.emitToken(contextNode, token, pos, writeTokenText);
         }
 
         function writeTokenText(token: SyntaxKind, pos?: number) {
             const tokenString = tokenToString(token);
             write(tokenString);
             return pos < 0 ? pos : pos + tokenString.length;
+        }
+
+        function writeLineOrSpace(node: Node) {
+            if (getEmitFlags(node) & EmitFlags.SingleLine) {
+                write(" ");
+            }
+            else {
+                writeLine();
+            }
+        }
+
+        function writeLine() {
+            writer.writeLine();
+        }
+
+        function writeLines(text: string): void {
+            const lines = text.split(/\r\n?|\n/g);
+            const indentation = guessIndentation(lines);
+            for (let i = 0; i < lines.length; i++) {
+                const line = indentation ? lines[i].slice(indentation) : lines[i];
+                if (line.length) {
+                    if (i > 0) {
+                        writeLine();
+                    }
+                    write(line);
+                }
+            }
+        }
+
+        function guessIndentation(lines: string[]) {
+            let indentation: number;
+            for (const line of lines) {
+                for (let i = 0; i < line.length && (indentation === undefined || i < indentation); i++) {
+                    if (!isWhiteSpace(line.charCodeAt(i))) {
+                        if (indentation === undefined || i < indentation) {
+                            indentation = i;
+                            break;
+                        }
+                    }
+                }
+            }
+            return indentation;
+        }
+
+        function increaseIndent(): void {
+            writer.increaseIndent();
         }
 
         function increaseIndentIf(value: boolean, valueToWriteWhenNotIndenting?: string) {
@@ -2336,6 +2127,10 @@ namespace ts {
             else if (valueToWriteWhenNotIndenting) {
                 write(valueToWriteWhenNotIndenting);
             }
+        }
+
+        function decreaseIndent(): void {
+            writer.decreaseIndent();
         }
 
         // Helper function to decrease the indent if we previously indented.  Allows multiple
@@ -2451,6 +2246,16 @@ namespace ts {
                 && !rangeEndIsOnSameLineAsRangeStart(node1, node2, currentSourceFile);
         }
 
+        function isSingleLineEmptyBlock(block: Block) {
+            return !block.multiLine
+                && isEmptyBlock(block);
+        }
+
+        function isEmptyBlock(block: BlockLike) {
+            return block.statements.length === 0
+                && rangeEndIsOnSameLineAsRangeStart(block, block, currentSourceFile);
+        }
+
         function skipSynthesizedParentheses(node: Node) {
             while (node.kind === SyntaxKind.ParenthesizedExpression && nodeIsSynthesized(node)) {
                 node = (<ParenthesizedExpression>node).expression;
@@ -2490,45 +2295,47 @@ namespace ts {
             return getLiteralText(node, currentSourceFile, languageVersion);
         }
 
-        function isSingleLineEmptyBlock(block: Block) {
-            return !block.multiLine
-                && isEmptyBlock(block);
+        function pushNameGenerationScope(): void {
+            nameGenerator.pushNameGenerationScope();
         }
 
-        function isEmptyBlock(block: BlockLike) {
-            return block.statements.length === 0
-                && rangeEndIsOnSameLineAsRangeStart(block, block, currentSourceFile);
+        function popNameGenerationScope(): void {
+            nameGenerator.popNameGenerationScope();
         }
 
-        function createDelimiterMap() {
-            const delimiters: string[] = [];
-            delimiters[ListFormat.None] = "";
-            delimiters[ListFormat.CommaDelimited] = ",";
-            delimiters[ListFormat.BarDelimited] = " |";
-            delimiters[ListFormat.AmpersandDelimited] = " &";
-            return delimiters;
+        function generateName(name: GeneratedIdentifier): string {
+            return nameGenerator.generateName(name);
         }
+    }
 
-        function getDelimiter(format: ListFormat) {
-            return delimiters[format & ListFormat.DelimitersMask];
-        }
+    function createDelimiterMap() {
+        const delimiters: string[] = [];
+        delimiters[ListFormat.None] = "";
+        delimiters[ListFormat.CommaDelimited] = ",";
+        delimiters[ListFormat.BarDelimited] = " |";
+        delimiters[ListFormat.AmpersandDelimited] = " &";
+        return delimiters;
+    }
 
-        function createBracketsMap() {
-            const brackets: string[][] = [];
-            brackets[ListFormat.Braces] = ["{", "}"];
-            brackets[ListFormat.Parenthesis] = ["(", ")"];
-            brackets[ListFormat.AngleBrackets] = ["<", ">"];
-            brackets[ListFormat.SquareBrackets] = ["[", "]"];
-            return brackets;
-        }
+    function getDelimiter(format: ListFormat) {
+        return delimiters[format & ListFormat.DelimitersMask];
+    }
 
-        function getOpeningBracket(format: ListFormat) {
-            return brackets[format & ListFormat.BracketsMask][0];
-        }
+    function createBracketsMap() {
+        const brackets: string[][] = [];
+        brackets[ListFormat.Braces] = ["{", "}"];
+        brackets[ListFormat.Parenthesis] = ["(", ")"];
+        brackets[ListFormat.AngleBrackets] = ["<", ">"];
+        brackets[ListFormat.SquareBrackets] = ["[", "]"];
+        return brackets;
+    }
 
-        function getClosingBracket(format: ListFormat) {
-            return brackets[format & ListFormat.BracketsMask][1];
-        }
+    function getOpeningBracket(format: ListFormat) {
+        return brackets[format & ListFormat.BracketsMask][0];
+    }
+
+    function getClosingBracket(format: ListFormat) {
+        return brackets[format & ListFormat.BracketsMask][1];
     }
 
     const enum ListFormat {

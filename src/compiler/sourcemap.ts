@@ -38,11 +38,11 @@ namespace ts {
         /**
          * Emits a node with possible leading and trailing source maps.
          *
-         * @param emitContext The current emit context
+         * @param hint The current emit context
          * @param node The node to emit.
          * @param emitCallback The callback used to emit the node.
          */
-        emitNodeWithSourceMap(emitContext: EmitContext, node: Node, emitCallback: (emitContext: EmitContext, node: Node) => void): void;
+        emitNodeWithSourceMap(hint: EmitHint, node: Node, emitCallback: (hint: EmitHint, node: Node) => void): void;
 
         /**
          * Emits a token of a node node with possible leading and trailing source maps.
@@ -79,7 +79,7 @@ namespace ts {
         sourceIndex: 0
     };
 
-    export function createSourceMapWriter(host: EmitHost, writer: EmitTextWriter): SourceMapWriter {
+    export function createSourceMapWriter(host: EmitHost, writer: EmitTextWriter, context?: PrintContext): SourceMapWriter {
         const compilerOptions = host.getCompilerOptions();
         const extendedDiagnostics = compilerOptions.extendedDiagnostics;
         let currentSourceFile: SourceFile;
@@ -97,6 +97,18 @@ namespace ts {
         // Source map data
         let sourceMapData: SourceMapData;
         let disabled: boolean = !(compilerOptions.sourceMap || compilerOptions.inlineSourceMap);
+
+        const previousEmit = context && context.emit;
+        const previousEmitToken = context && context.emitToken;
+        const previousEmitPos = context && context.emitPos;
+        if (context) {
+            context.emit = emitNodeWithSourceMap;
+            context.emitPos = pos => {
+                previousEmitPos(pos);
+                emitPos(pos);
+            };
+            context.emitToken = emitTokenWithSourceMap;
+        }
 
         return {
             initialize,
@@ -311,12 +323,13 @@ namespace ts {
         /**
          * Emits a node with possible leading and trailing source maps.
          *
+         * @param hint A hint as to the intended usage of the node.
          * @param node The node to emit.
          * @param emitCallback The callback used to emit the node.
          */
-        function emitNodeWithSourceMap(emitContext: EmitContext, node: Node, emitCallback: (emitContext: EmitContext, node: Node) => void) {
+        function emitNodeWithSourceMap(hint: EmitHint, node: Node, emitCallback: (hint: EmitHint, node: Node) => void) {
             if (disabled) {
-                return emitCallback(emitContext, node);
+                return emitIndirect(hint, node, emitCallback);
             }
 
             if (node) {
@@ -332,11 +345,11 @@ namespace ts {
 
                 if (emitFlags & EmitFlags.NoNestedSourceMaps) {
                     disabled = true;
-                    emitCallback(emitContext, node);
+                    emitIndirect(hint, node, emitCallback);
                     disabled = false;
                 }
                 else {
-                    emitCallback(emitContext, node);
+                    emitIndirect(hint, node, emitCallback);
                 }
 
                 if (node.kind !== SyntaxKind.NotEmittedStatement
@@ -344,6 +357,15 @@ namespace ts {
                     && end >= 0) {
                     emitPos(end);
                 }
+            }
+        }
+
+        function emitIndirect(hint: EmitHint, node: Node, emitCallback: (hint: EmitHint, node: Node) => void) {
+            if (previousEmit) {
+                previousEmit(hint, node, emitCallback);
+            }
+            else {
+                emitCallback(hint, node);
             }
         }
 
@@ -357,7 +379,7 @@ namespace ts {
          */
         function emitTokenWithSourceMap(node: Node, token: SyntaxKind, tokenPos: number, emitCallback: (token: SyntaxKind, tokenStartPos: number) => number) {
             if (disabled) {
-                return emitCallback(token, tokenPos);
+                return emitTokenIndirect(node, token, tokenPos, emitCallback);
             }
 
             const emitNode = node && node.emitNode;
@@ -369,7 +391,7 @@ namespace ts {
                 emitPos(tokenPos);
             }
 
-            tokenPos = emitCallback(token, tokenPos);
+            tokenPos = emitTokenIndirect(node, token, tokenPos, emitCallback);
 
             if (range) tokenPos = range.end;
             if ((emitFlags & EmitFlags.NoTokenTrailingSourceMaps) === 0 && tokenPos >= 0) {
@@ -377,6 +399,15 @@ namespace ts {
             }
 
             return tokenPos;
+        }
+
+        function emitTokenIndirect(node: Node, token: SyntaxKind, tokenPos: number, emitCallback: (token: SyntaxKind, tokenStartPos: number) => number) {
+            if (previousEmitToken) {
+                return previousEmitToken(node, token, tokenPos, emitCallback);
+            }
+            else {
+                return emitCallback(token, tokenPos);
+            }
         }
 
         /**

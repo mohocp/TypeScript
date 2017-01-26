@@ -5,17 +5,15 @@ namespace ts {
     export interface CommentWriter {
         reset(): void;
         setSourceFile(sourceFile: SourceFile): void;
-        emitNodeWithComments(emitContext: EmitContext, node: Node, emitCallback: (emitContext: EmitContext, node: Node) => void): void;
-        emitBodyWithDetachedComments(node: Node, detachedRange: TextRange, emitCallback: (node: Node) => void): void;
+        emitNodeWithComments(hint: EmitHint, node: Node, emitCallback: (hint: EmitHint, node: Node) => void): void;
+        emitBodyWithDetachedComments(node: Node, elements: NodeArray<Node>, emitCallback: (node: Node) => void): void;
         emitTrailingCommentsOfPosition(pos: number): void;
     }
 
-    export function createCommentWriter(host: EmitHost, writer: EmitTextWriter, sourceMap: SourceMapWriter): CommentWriter {
-        const compilerOptions = host.getCompilerOptions();
+    export function createCommentWriter(writer: EmitTextWriter, compilerOptions: CompilerOptions, newLine: string, emitPosOrContext: ((pos: number) => void) | PrintContext): CommentWriter {
         const extendedDiagnostics = compilerOptions.extendedDiagnostics;
-        const newLine = host.getNewLine();
-        const { emitPos } = sourceMap;
-
+        const emitPos = typeof emitPosOrContext === "function" ? emitPosOrContext : emitPosOrContext.emitPos;
+        const context = typeof emitPosOrContext === "function" ? undefined : emitPosOrContext;
         let containerPos = -1;
         let containerEnd = -1;
         let declarationListContainerEnd = -1;
@@ -26,6 +24,26 @@ namespace ts {
         let hasWrittenComment = false;
         let disabled: boolean = compilerOptions.removeComments;
 
+        const previousEmit = context && context.emit;
+        const previousEmitBody = context && context.emitBody;
+        const previousEmitElement = context && context.emitElement;
+        if (context) {
+            context.emit = emitNodeWithComments;
+            context.emitBody = emitBodyWithDetachedComments;
+            context.emitElement = (node, callback) => {
+                if ((getEmitFlags(node) & EmitFlags.NoLeadingComments) === 0) {
+                    const commentRange = getCommentRange(node);
+                    emitTrailingCommentsOfPosition(commentRange.pos);
+                }
+                if (previousEmitElement) {
+                    previousEmitElement(node, callback);
+                }
+                else {
+                    callback(node);
+                }
+            };
+        }
+
         return {
             reset,
             setSourceFile,
@@ -34,9 +52,9 @@ namespace ts {
             emitTrailingCommentsOfPosition,
         };
 
-        function emitNodeWithComments(emitContext: EmitContext, node: Node, emitCallback: (emitContext: EmitContext, node: Node) => void) {
+        function emitNodeWithComments(hint: EmitHint, node: Node, emitCallback: (hint: EmitHint, node: Node) => void) {
             if (disabled) {
-                emitCallback(emitContext, node);
+                emitIndirect(hint, node, emitCallback);
                 return;
             }
 
@@ -47,11 +65,11 @@ namespace ts {
                     // Both pos and end are synthesized, so just emit the node without comments.
                     if (emitFlags & EmitFlags.NoNestedComments) {
                         disabled = true;
-                        emitCallback(emitContext, node);
+                        emitIndirect(hint, node, emitCallback);
                         disabled = false;
                     }
                     else {
-                        emitCallback(emitContext, node);
+                        emitIndirect(hint, node, emitCallback);
                     }
                 }
                 else {
@@ -94,11 +112,11 @@ namespace ts {
 
                     if (emitFlags & EmitFlags.NoNestedComments) {
                         disabled = true;
-                        emitCallback(emitContext, node);
+                        emitIndirect(hint, node, emitCallback);
                         disabled = false;
                     }
                     else {
-                        emitCallback(emitContext, node);
+                        emitIndirect(hint, node, emitCallback);
                     }
 
                     if (extendedDiagnostics) {
@@ -123,18 +141,27 @@ namespace ts {
             }
         }
 
-        function emitBodyWithDetachedComments(node: Node, detachedRange: TextRange, emitCallback: (node: Node) => void) {
+        function emitIndirect(hint: EmitHint, node: Node, emitCallback: (hint: EmitHint, node: Node) => void) {
+            if (previousEmit) {
+                previousEmit(hint, node, emitCallback);
+            }
+            else {
+                emitCallback(hint, node);
+            }
+        }
+
+        function emitBodyWithDetachedComments(node: Node, elements: NodeArray<Node>, emitCallback: (node: Node) => void) {
             if (extendedDiagnostics) {
                 performance.mark("preEmitBodyWithDetachedComments");
             }
 
-            const { pos, end } = detachedRange;
+            const { pos, end } = elements;
             const emitFlags = getEmitFlags(node);
             const skipLeadingComments = pos < 0 || (emitFlags & EmitFlags.NoLeadingComments) !== 0;
             const skipTrailingComments = disabled || end < 0 || (emitFlags & EmitFlags.NoTrailingComments) !== 0;
 
             if (!skipLeadingComments) {
-                emitDetachedCommentsAndUpdateCommentsInfo(detachedRange);
+                emitDetachedCommentsAndUpdateCommentsInfo(elements);
             }
 
             if (extendedDiagnostics) {
@@ -143,11 +170,11 @@ namespace ts {
 
             if (emitFlags & EmitFlags.NoNestedComments && !disabled) {
                 disabled = true;
-                emitCallback(node);
+                emitBodyIndirect(node, elements, emitCallback);
                 disabled = false;
             }
             else {
-                emitCallback(node);
+                emitBodyIndirect(node, elements, emitCallback);
             }
 
             if (extendedDiagnostics) {
@@ -155,7 +182,7 @@ namespace ts {
             }
 
             if (!skipTrailingComments) {
-                emitLeadingComments(detachedRange.end, /*isEmittedNode*/ true);
+                emitLeadingComments(elements.end, /*isEmittedNode*/ true);
                 if (hasWrittenComment && !writer.isAtStartOfLine()) {
                     writer.writeLine();
                 }
@@ -163,6 +190,15 @@ namespace ts {
 
             if (extendedDiagnostics) {
                 performance.measure("commentTime", "beginEmitBodyWithDetachedCommetns");
+            }
+        }
+
+        function emitBodyIndirect(node: Node, elements: NodeArray<Node>, emitCallback: (node: Node) => void) {
+            if (previousEmitBody) {
+                previousEmitBody(node, elements, emitCallback);
+            }
+            else {
+                emitCallback(node);
             }
         }
 
