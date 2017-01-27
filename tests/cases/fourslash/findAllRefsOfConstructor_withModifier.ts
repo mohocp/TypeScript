@@ -7,4 +7,4 @@
 
 const ranges = test.ranges();
 const ctr = ranges[0];
-verify.referencesOf(ctr, ranges);
+verify.referenceGroups(ctr, [{ definition: "constructor X(): X", ranges }]);
