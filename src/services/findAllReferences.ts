@@ -5,6 +5,10 @@ namespace ts.FindAllReferences {
         return getReferencedSymbolsForNode(typeChecker, cancellationToken, node, sourceFiles, findInStrings, findInComments, isForRename);
     }
 
+    export function convertReferences(referenceSymbols: ReferencedSymbol[]): ReferenceEntry[] {
+        return referenceSymbols && flatMap(referenceSymbols, r => r.references);
+    }
+
     export function getReferencedSymbolsForNode(typeChecker: TypeChecker, cancellationToken: CancellationToken, node: Node, sourceFiles: SourceFile[], findInStrings?: boolean, findInComments?: boolean, isForRename?: boolean, implementations?: boolean): ReferencedSymbol[] | undefined {
         if (!implementations) {
             const special = getReferencedSymbolsSpecial(node, sourceFiles, typeChecker, cancellationToken);
@@ -402,23 +406,12 @@ namespace ts.FindAllReferences {
 
     function getAllReferencesForKeyword(sourceFiles: SourceFile[], keywordKind: ts.SyntaxKind, cancellationToken: CancellationToken): ReferencedSymbol[] {
         const name = tokenToString(keywordKind);
-        const definition: ReferencedSymbolDefinitionInfo = {
-            containerKind: "",
-            containerName: "",
-            fileName: "",
-            kind: ScriptElementKind.keyword,
-            name,
-            textSpan: createTextSpan(0, 1),
-            displayParts: [{ text: name, kind: ScriptElementKind.keyword }]
-        }
-
         const references: ReferenceEntry[] = [];
         for (const sourceFile of sourceFiles) {
             cancellationToken.throwIfCancellationRequested();
             addReferencesForKeywordInFile(sourceFile, keywordKind, name, cancellationToken, references);
         }
-
-        return [{ definition, references }];
+        return [{ definition: undefined, references }];
     }
 
     function addReferencesForKeywordInFile(sourceFile: SourceFile, kind: SyntaxKind, searchText: string, cancellationToken: CancellationToken, references: Push<ReferenceEntry>): void {
@@ -1314,20 +1307,6 @@ namespace ts.FindAllReferences {
             while (meaning !== lastIterationMeaning);
         }
         return meaning;
-    }
-
-    export function convertReferences(referenceSymbols: ReferencedSymbol[]): ReferenceEntry[] {
-        if (!referenceSymbols) {
-            return undefined;
-        }
-
-        const referenceEntries: ReferenceEntry[] = [];
-
-        for (const referenceSymbol of referenceSymbols) {
-            addRange(referenceEntries, referenceSymbol.references);
-        }
-
-        return referenceEntries;
     }
 
     function isImplementation(node: Node): boolean {

@@ -1415,8 +1415,9 @@ namespace ts {
 
         function findReferences(fileName: string, position: number): ReferencedSymbol[] {
             const referencedSymbols = findReferencedSymbols(fileName, position, /*findInStrings*/ false, /*findInComments*/ false, /*isForRename*/false);
-
             // Only include referenced symbols that have a valid definition.
+            //Won't this exclude references for strings???
+            //Yes, the comment even says so...
             return filter(referencedSymbols, rs => !!rs.definition);
         }
 

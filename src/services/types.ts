@@ -219,7 +219,7 @@ namespace ts {
         getTypeDefinitionAtPosition(fileName: string, position: number): DefinitionInfo[];
         getImplementationAtPosition(fileName: string, position: number): ImplementationLocation[];
 
-        getReferencesAtPosition(fileName: string, position: number): ReferenceEntry[];
+        getReferencesAtPosition(fileName: string, position: number): ReferenceEntry[]; ///? why not use below?
         findReferences(fileName: string, position: number): ReferencedSymbol[];
         getDocumentHighlights(fileName: string, position: number, filesToSearch: string[]): DocumentHighlights[];
 

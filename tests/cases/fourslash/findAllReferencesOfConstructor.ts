@@ -41,6 +41,6 @@
 ////class d extends a.C { constructor() { [|super|](); }
 
 const ranges = test.ranges();
-for (const ctr of ranges.slice(0, 3)) {
-    verify.referencesOf(ctr, ranges);
-}
+const constructors = ranges.slice(0, 3);
+verify.referenceGroups([ranges[0], ranges[2]], [{ definition: "constructor C(n: number): C (+1 overload)", ranges }]);
+verify.referenceGroups(ranges[1], [{ definition: "constructor C(): C (+1 overload)", ranges }]);
